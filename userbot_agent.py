@@ -13,9 +13,13 @@ PHONE = '+79686041007'  # Ваш номер
 SOURCE_CHANNEL = -1003969868108  # Канал откуда брать новости
 TARGET_CHAT = -1003780268513     # Куда отправлять результат
 
+# Вставьте ваш актуальный ключ сюда, если он изменился
 OPENROUTER_API_KEY = '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'
-TEXT_MODEL = 'deepseek/deepseek-v4-flash:free'
-IMAGE_MODEL = 'google/gemini-2.5-flash-image-preview:free'  # Или другая доступная
+
+# Используем стабильные бесплатные модели
+# Список актуальных бесплатных моделей: https://openrouter.ai/models?q=free
+TEXT_MODEL = 'google/gemma-2-9b-it:free' 
+IMAGE_MODEL = 'google/gemma-2-9b-it:free'  # Для анализа изображений тоже используем надежную модель
 
 SESSION_NAME = 'my_userbot_session'
 
