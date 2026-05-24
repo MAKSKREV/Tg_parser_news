@@ -1,9 +1,9 @@
 import asyncio
 import logging
 import os
+import aiohttp
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
-from openrouter import AsyncOpenRouter
 
 # --- КОНФИГУРАЦИЯ ---
 API_ID = 25316255
@@ -32,7 +32,14 @@ logger = logging.getLogger(__name__)
 
 # Инициализация клиентов
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-openrouter_client = AsyncOpenRouter(api_key=OPENROUTER_API_KEY)
+
+# OpenRouter клиент через aiohttp (так как библиотека не установлена или несовместима)
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://github.com/your-app",  # Опционально
+}
 
 # Хранилище ID последнего обработанного сообщения
 last_message_id = 0
@@ -47,13 +54,21 @@ async def rewrite_text(text: str) -> str:
     {text}
     """
     
+    payload = {
+        "model": TEXT_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 300
+    }
+    
     try:
-        response = await openrouter_client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=300
-        )
-        return response.choices[0].message.content
+        async with aiohttp.ClientSession() as session:
+            async with session.post(OPENROUTER_URL, json=payload, headers=HEADERS) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data['choices'][0]['message']['content']
+                else:
+                    error_text = await resp.text()
+                    raise Exception(f"HTTP {resp.status}: {error_text}")
     except Exception as e:
         logger.error(f"Ошибка при переписывании текста: {e}")
         return f"⚠️ Ошибка обработки текста: {e}\n\nОригинал:\n{text}"
@@ -88,20 +103,22 @@ async def process_image(image_path: str, prompt_text: str) -> str:
             }
         ]
 
-        response = await openrouter_client.chat.completions.create(
-            model=IMAGE_MODEL,
-            messages=messages,
-            max_tokens=500 # Ожидаем описание или ссылку, если модель генерирует новую
-        )
+        payload = {
+            "model": IMAGE_MODEL,
+            "messages": messages,
+            "max_tokens": 500
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(OPENROUTER_URL, json=payload, headers=HEADERS) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result_text = data['choices'][0]['message']['content']
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"HTTP ошибка от API изображений: {resp.status} - {error_text}")
+                    return None
         
-        # Внимание: Большинство бесплатных моделей на OR через ChatCompletion возвращают ТЕКСТ (описание), 
-        # а не сам файл картинки. 
-        # Если модель возвращает ссылку на сгенерированное фото - отлично.
-        # Если она просто описывает, как бы она изменила фото - нам придется скачать оригинал и отправить его с подписью.
-        # На данный момент бесплатные image-to-image модели на OR редки или работают специфично.
-        # Логика ниже предполагает, что если картинка не сгенерирована заново, мы отправим оригинал.
-        
-        result_text = response.choices[0].message.content
         logger.info(f"Ответ от модели изображения: {result_text}")
         
         # Если модель вернула URL новой картинки (некоторые модели так делают)
