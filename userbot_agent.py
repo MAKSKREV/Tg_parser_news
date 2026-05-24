@@ -10,8 +10,8 @@ API_ID = 25316255
 API_HASH = 'caacc56333e6d2445732ea75eddd56e5'
 PHONE = '+79686041007'  # Ваш номер
 
-SOURCE_CHANNEL = -1003808796392  # Канал откуда брать новости
-TARGET_CHAT = -1003721535372     # Куда отправлять результат
+SOURCE_CHANNEL = -1003969868108  # Канал откуда брать новости
+TARGET_CHAT = -1003780268513     # Куда отправлять результат
 
 OPENROUTER_API_KEY = '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'
 TEXT_MODEL = 'deepseek/deepseek-v4-flash:free'
