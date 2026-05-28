@@ -201,6 +201,14 @@ async def main():
     await client.start(phone=PHONE)
     logger.info("Клиент запущен и авторизован!")
     
+    # Генерируем SESSION_STRING после авторизации
+    session_string = client.session.save()
+    logger.info("==============================")
+    logger.info("ВАША SESSION_STRING:")
+    logger.info(session_string)
+    logger.info("Скопируйте эту строку и добавьте в переменную SESSION_STRING на хостинге!")
+    logger.info("==============================")
+    
     # Получаем последнее сообщение, чтобы не обрабатывать старые
     try:
         history = await client.get_messages(SOURCE_CHANNEL, limit=1)
