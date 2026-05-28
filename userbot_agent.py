@@ -1,200 +1,184 @@
-import os
 import asyncio
 import logging
-import aiohttp
+import os
+import re
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from openrouter import AsyncOpenRouter
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
+import aiohttp
 
-# --- Конфигурация из переменных окружения ---
-API_ID = int(os.getenv("TELEGRAM_API_ID"))
-API_HASH = os.getenv("TELEGRAM_API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# --- КОНФИГУРАЦИЯ ---
+# Читаем из переменных окружения (для хостинга) или используем дефолтные (для локального теста)
+API_ID = int(os.getenv("TELEGRAM_API_ID", "29983666"))
+API_HASH = os.getenv("TELEGRAM_API_HASH", "b57c50e3a54f45318d78d3004619e376")
+SESSION_STRING = os.getenv("SESSION_STRING") # ЭТО КЛЮЧЕВОЕ ДЛЯ ХОСТИНГА
 
-SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", "-1003808796392"))
-DESTINATION_CHAT_ID = int(os.getenv("DESTINATION_CHAT_ID", "-1003721535372"))
+# ВСТАВЬТЕ СЮДА ЧИСЛОВЫЕ ID КАНАЛОВ
+SOURCE_CHANNELS = [
+    -1002571054985,
+    -1001111641330,
+    -1002544270889,
+    -1003969868108, 
+    -1001458367088,
+    -1001161903924,
+] 
 
-# Модели
-TEXT_MODEL = "deepseek/deepseek-v4-flash:free"
-IMAGE_MODEL = "google/gemini-2.5-flash-image-preview:free" # Или другая доступная бесплатная
+DEST_CHANNEL = int(os.getenv("DEST_CHANNEL", "-1003780268513"))
+
+# OpenRouter API
+API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/llama-3-8b-instruct")
+
+SESSION_NAME = 'my_userbot_session'
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация клиентов
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-openrouter_client = AsyncOpenRouter(api_key=OPENROUTER_API_KEY)
+# Инициализация клиента: если есть SESSION_STRING, используем её, иначе создаем новую сессию в файл
+if SESSION_STRING:
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+    logger.info("Запуск через SESSION_STRING (режим хостинга).")
+else:
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    logger.warning("SESSION_STRING не найден. Запуск в режиме локальной генерации сессии.")
 
-# Хранилище ID последнего обработанного сообщения (чтобы не дублировать)
-last_processed_id = 0
+# Хранилище ID обработанных сообщений
+processed_ids = set()
 
-async def rewrite_text(text: str) -> str:
-    """Переписывает текст в кликбейтном стиле"""
-    prompt = f"""
-    Перепиши эту новость в ярком, кликбейтном, кратком стиле для Telegram.
-    Добавь много эмодзи 🔥🚀💣.
-    В конце добавь 3-5 релевантных хештегов.
-    Текст новости:
-    {text}
-    """
-    
-    try:
-        response = await openrouter_client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"Ошибка при рерайте текста: {e}")
-        return f"⚠️ Ошибка обработки текста: {e}\n\nОригинал:\n{text}"
+SYSTEM_PROMPT = """Ты редактор технического дайджеста про нейросети. Твоя задача — переписать новость в строгом формате.
 
-async def process_image(image_path: str, prompt_text: str) -> str:
-    """Отправляет картинку в AI для стилизации (киберпанк/неон)"""
-    # Примечание: Прямая генерация/редактирование изображений через OpenRouter API 
-    # может требовать специфических параметров или поддержки модели.
-    # Здесь мы используем подход: отправляем картинку + промпт модели, которая умеет видеть и описывать/менять.
-    # Если модель поддерживает image-to-image, она вернет новую картинку. 
-    # Если нет - вернет описание. Для полноценного image-to-image лучше использовать специфические эндпоинты,
-    # но попробуем универсальный чат с вложением изображения, если модель поддерживает vision.
-    
-    # ВАЖНО: Большинство бесплатных моделей на OpenRouter сейчас - это текстовые или vision (понимают фото),
-    # но не все умеют ВОЗВРАЩАТЬ фото (image-to-image). 
-    # Модель google/gemini-2.5-flash-image-preview:free может генерировать, но через API это сложно.
-    # Для стабильности в этом коде мы попробуем отправить запрос. Если модель не вернет фото, 
-    # мы отправим оригинал с новым описанием.
-    
-    try:
-        with open(image_path, "rb") as f:
-            # Читаем как base64 или binary, зависит от библиотеки openrouter python.
-            # Библиотека openrouter обычно ожидает URL или base64 в message content.
-            import base64
-            base64_image = base64.b64encode(f.read()).decode('utf-8')
-            
-            prompt = f"Сделай стилизацию этого изображения в стиле Киберпанк / Неоновый Арт. Верни результат как изображение."
-            
-            # Формируем сообщение с картинкой (стандарт OpenAI compatible)
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]
-            }]
+ПРАВИЛА:
+1. Удали всю рекламу: курсы, конкурсы, призывы подписаться на другие каналы.
+2. Удали ссылки на другие Telegram-каналы (t.me/..., telegram.me/...), но оставь ссылки на сайты, гитхаб, статьи.
+3. Определи тип новости: это инструмент/скрипт/программа для установки ИЛИ просто информационная новость?
 
-            response = await openrouter_client.chat.completions.create(
-                model=IMAGE_MODEL,
-                messages=messages
-            )
-            
-            # Проверяем, вернула ли модель изображение (обычно в content или special field)
-            # Многие модели возвращают просто текст-описание новой картинки.
-            # Если модель реально генерирует image-to-image, ответ может содержать url или base64.
-            # Пока предположим, что если это текстовая модель с vision, она опишет результат.
-            # Для реальной замены картинки нужен сервис типа Replicate или специфический API.
-            # В рамках задачи "используй OpenRouter", если модель не вернет картинку, мы вернем None, 
-            # и бот отправит оригинал.
-            
-            # ПРОВЕРКА: Если модель возвращает изображение в формате DALL-E style (url)
-            if hasattr(response.choices[0].message, 'images') and response.choices[0].message.images:
-                 # Скачиваем новое изображение
-                 img_url = response.choices[0].message.images[0].url # Примерный путь
-                 async with aiohttp.ClientSession() as session:
-                     async with session.get(img_url) as resp:
-                         new_img_data = await resp.read()
-                         new_path = image_path.replace(".jpg", "_styled.jpg")
-                         with open(new_path, "wb") as f_new:
-                             f_new.write(new_img_data)
-                         return new_path
-            
-            logger.info("Модель не вернула новое изображение (возможно, только текст). Используем оригинал.")
-            return None
+ФОРМАТ ОТВЕТА (строго следуй структуре):
+🔥 **Заголовок новости** (коротко и ясно)
 
-    except Exception as e:
-        logger.error(f"Ошибка обработки изображения: {e}")
+💡 **Суть:** 
+(1-2 предложения, о чем новость)
+
+🛠 **Возможности:**
+• (Пункт 1)
+• (Пункт 2)
+• (Пункт 3)
+
+
+[БЛОК СЛОЖНОСТИ ТОЛЬКО ЕСЛИ ЕСТЬ ЧТО УСТАНАВЛИВАТЬ]
+⚙️ **Сложность установки:** X/10 (где X — число от 0 до 10. 0 — работает в браузере, 10 — нужен сложный конфиг сервера. Если новость просто информационная — НЕ пиши этот блок).
+
+🔗 **Источники:**
+(Список полезных ссылок без телеграм-рекламы)
+
+ВАЖНО: Не пиши никаких вступлений типа "Вот анализ". Только готовый пост."""
+
+async def process_news(text):
+    """Отправляет текст на анализ AI."""
+    if not text:
         return None
 
-@client.on(events.NewMessage(chats=[SOURCE_CHANNEL_ID]))
-async def handler(event):
-    global last_processed_id
-    
-    # Защита от старых сообщений при старте
-    if event.id <= last_processed_id:
-        return
-    
-    last_processed_id = event.id
-    logger.info(f"Новое сообщение найдено в канале! ID: {event.id}")
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/my-userbot",
+        "X-Title": "TG AI Digest"
+    }
 
-    text_content = event.raw_text
-    media = event.media
-    photo_path = None
-    styled_photo_path = None
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Обработай эту новость:\n\n{text}"}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 800
+    }
 
-    # 1. Обработка текста
-    final_text = text_content
-    if text_content:
-        logger.info("Обработка текста...")
-        final_text = await rewrite_text(text_content)
-    
-    # 2. Обработка изображения
-    if media and hasattr(media, 'photo'):
-        logger.info("Найдено изображение, скачивание...")
-        photo_path = await event.download_media()
-        
-        if photo_path:
-            logger.info("Стилизация изображения...")
-            styled_photo_path = await process_image(photo_path, final_text)
-            
-            # Если стилизация не удалась или модель не вернула фото, используем оригинал
-            if not styled_photo_path:
-                styled_photo_path = photo_path
-
-    # 3. Отправка результата
     try:
-        if styled_photo_path:
-            logger.info(f"Отправка фото с подписью в {DESTINATION_CHAT_ID}...")
-            await client.send_file(
-                DESTINATION_CHAT_ID,
-                styled_photo_path,
-                caption=final_text,
-                parse_mode='md'
-            )
-            # Чистим файлы
-            if os.path.exists(photo_path): os.remove(photo_path)
-            if styled_photo_path != photo_path and os.path.exists(styled_photo_path): os.remove(styled_photo_path)
-        elif text_content:
-            logger.info(f"Отправка текста в {DESTINATION_CHAT_ID}...")
-            await client.send_message(DESTINATION_CHAT_ID, final_text, parse_mode='md')
-        else:
-            logger.warning("Сообщение пустое и без медиа, пропускаем.")
-            
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                json=payload,
+                headers=headers
+            ) as response:
+                data = await response.json()
+                if response.status == 200:
+                    return data['choices'][0]['message']['content']
+                else:
+                    logger.error(f"AI Error {response.status}: {data}")
+                    return None
     except Exception as e:
-        logger.error(f"Ошибка при отправке ответа: {e}")
+        logger.error(f"Connection error: {e}")
+        return None
+
+@client.on(events.NewMessage(chats=SOURCE_CHANNELS))
+async def handler(event):
+    message = event.message
+    
+    # Защита от дублей
+    msg_id = event.chat_id * 1000000 + message.id
+    if msg_id in processed_ids:
+        logger.debug(f"Дубль сообщения {message.id}, пропускаем.")
+        return
+    processed_ids.add(msg_id)
+    
+    if len(processed_ids) > 1000:
+        processed_ids.clear()
+
+    logger.info(f"Новый пост ID: {message.id} из канала {event.chat_id}")
+
+    original_text = message.text or ""
+    media = message.media
+    
+    file_to_send = None
+    if media and not isinstance(media, MessageMediaWebPage):
+        if isinstance(media, (MessageMediaPhoto, MessageMediaDocument)):
+            file_to_send = media
+
+    final_text = original_text
+
+    if original_text:
+        spam_keywords = ["курс", "обучение", "конкурс", "розыгрыш", "подпишись", "заработок"]
+        # Логика фильтрации остается, но AI всё равно почистит
+        
+        logger.info("Анализ новости AI...")
+        processed = await process_news(original_text)
+        
+        if processed:
+            final_text = processed
+            logger.info("Текст успешно оформлен.")
+        else:
+            logger.warning("AI не ответил, отправляем оригинал.")
+            
+    try:
+        await client.send_message(DEST_CHANNEL, final_text, file=file_to_send)
+        logger.info("Опубликовано в целевой канал.")
+    except Exception as e:
+        logger.error(f"Ошибка публикации: {e}")
 
 async def main():
-    logger.info("Запуск Userbot агента...")
-    logger.info(f"Канал источник: {SOURCE_CHANNEL_ID}")
-    logger.info(f"Чат назначения: {DESTINATION_CHAT_ID}")
+    # Если мы на хостинге (есть SESSION_STRING), стартуем сразу.
+    # Если локально (нет SESSION_STRING), то start() запросит номер телефона.
+    await client.start()
     
+    if not SESSION_STRING:
+        # Если запустили локально без строки, сохраняем созданную сессию в строку для удобства
+        session_str = client.session.save()
+        logger.info("="*30)
+        logger.info("ВАША SESSION_STRING:")
+        logger.info(session_str)
+        logger.info("Скопируйте эту строку и добавьте в переменную SESSION_STRING на хостинге!")
+        logger.info("="*30)
+    
+    logger.info("Бот запущен. Ожидание новостей...")
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
     try:
-        await client.start()
-        logger.info("Клиент успешно запущен!")
-        
-        # Проверка доступа
-        try:
-            entity = await client.get_entity(SOURCE_CHANNEL_ID)
-            logger.info(f"Доступ к каналу получен: {entity.title}")
-        except Exception as e:
-            logger.error(f"Нет доступа к каналу! Убедитесь, что аккаунт подписан. Ошибка: {e}")
-            return
-
-        await client.run_until_disconnected()
-    except Exception as e:
-        logger.error(f"Критическая ошибка запуска: {e}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Остановлено пользователем.")
